@@ -27,6 +27,7 @@ def get_system_stats(token):
     return response
 
 if __name__ == "__main__":
-    token = login("supervisor1", "Super@123")
-    if token:
-        get_system_stats(token)
+    for user, pwd in [("supervisor1", "Super@123"), ("operator1", "Oper@123")]:
+        token = login(user, pwd)
+        if token:
+            get_system_stats(token)

@@ -347,26 +347,64 @@ async def get_system_statistics(
 ):
     from sqlalchemy import text
     from datetime import timedelta
+    from ...models.user import UserTeam
 
     today_start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
 
+    team_ids = None
+    user_id = None
+    if current_user.role == "operator":
+        team_ids_result = await db.execute(
+            select(UserTeam.team_id).where(UserTeam.user_id == current_user.id)
+        )
+        team_ids = [str(r[0]) for r in team_ids_result.fetchall()]
+        user_id = str(current_user.id)
+
+    anomaly_permission_conditions = []
+    ticket_permission_conditions = []
+    if team_ids is not None or user_id is not None:
+        wo_conditions = []
+        if team_ids:
+            wo_conditions.append(WorkOrder.assigned_team_id.in_(team_ids))
+        if user_id:
+            wo_conditions.append(WorkOrder.assignee_id == user_id)
+        
+        if wo_conditions:
+            wo_subquery = select(WorkOrder.anomaly_id).where(or_(*wo_conditions))
+            anomaly_permission_conditions.append(Anomaly.id.in_(wo_subquery))
+            ticket_permission_conditions.append(or_(*wo_conditions))
+        else:
+            anomaly_permission_conditions.append(Anomaly.id.in_(select(WorkOrder.anomaly_id).where(or_(False, False))))
+            ticket_permission_conditions.append(or_(False, False))
+
     anomaly_count = await db.execute(
-        select(func.count(Anomaly.id)).where(Anomaly.detected_time >= today_start)
+        select(func.count(Anomaly.id)).where(
+            and_(Anomaly.detected_time >= today_start, *anomaly_permission_conditions)
+        )
     )
 
     ticket_count = await db.execute(
-        select(func.count(WorkOrder.id)).where(WorkOrder.created_at >= today_start)
+        select(func.count(WorkOrder.id)).where(
+            and_(WorkOrder.created_at >= today_start, *ticket_permission_conditions)
+        )
     )
 
     pending_count = await db.execute(
         select(func.count(WorkOrder.id)).where(
-            and_(WorkOrder.status.in_(["pending", "assigned", "in_progress", "verifying"]))
+            and_(
+                WorkOrder.status.in_(["pending", "assigned", "in_progress", "verifying"]),
+                *ticket_permission_conditions
+            )
         )
     )
 
     critical_open = await db.execute(
         select(func.count(Anomaly.id)).where(
-            and_(Anomaly.severity == "critical", Anomaly.status.in_(["open", "investigating"]))
+            and_(
+                Anomaly.severity == "critical",
+                Anomaly.status.in_(["open", "investigating"]),
+                *anomaly_permission_conditions
+            )
         )
     )
 
@@ -380,6 +418,7 @@ async def get_system_statistics(
                     and_(WorkOrder.resolved_at.isnot(None),
                          WorkOrder.resolved_at > WorkOrder.sla_deadline),
                 ),
+                *ticket_permission_conditions
             )
         )
     )
@@ -390,7 +429,11 @@ async def get_system_statistics(
         day_end = day_start + timedelta(days=1)
         day_count = await db.execute(
             select(func.count(Anomaly.id)).where(
-                and_(Anomaly.detected_time >= day_start, Anomaly.detected_time < day_end)
+                and_(
+                    Anomaly.detected_time >= day_start,
+                    Anomaly.detected_time < day_end,
+                    *anomaly_permission_conditions
+                )
             )
         )
         trend_7days.append({
